@@ -5,16 +5,16 @@
 
 
 import re
-
 import win32evtlog
 import win32api
 import argparse
 import socket
-from dingtalkchatbot.chatbot import DingtalkChatbot
 import pandas as pd
+import datetime
+from dingtalkchatbot.chatbot import DingtalkChatbot
+from config import DING_TOKEN, DING_SECRET
 
-DING_TOKEN = ''
-DING_SECRET = ''
+HOSTNAME = socket.gethostname()
 
 # print([x.split()[0] for x in s.split('\n') if x])
 EventCols = {
@@ -35,15 +35,19 @@ EventCols = {
 def notice(event):
     print(event['markdown']['title'])
     print(event['markdown']['text'])
-    dingding(event['markdown'])
+    dingding(event)
     return
 
 
-def dingding(markdown, is_at_all=False):
+def dingding(event, is_at_all=False):
     if DING_TOKEN:
         webhook = 'https://oapi.dingtalk.com/robot/send?access_token=' + DING_TOKEN
         xiaoding = DingtalkChatbot(webhook, secret=DING_SECRET)
-        xiaoding.send_markdown(title=markdown['title'], text=markdown['text'], is_at_all=is_at_all)
+        if event['EventID'] == 4625:
+            is_at_all = True
+        if event['Time'].hour > 18 or event['Time'].hour < 9:
+            is_at_all = True
+        xiaoding.send_markdown(title=event['markdown']['title'], text=event['markdown']['text'], is_at_all=is_at_all)
 
 
 def read_log(computer=None, logType='Security'):
@@ -151,42 +155,58 @@ def main():
         print("This sample only runs on NT")
         return
 
+    debug_filename = r'c:\{}_event.txt'.format(HOSTNAME)
     parser = argparse.ArgumentParser()
     parser.add_argument('--list', action='store_true', help='列出事件')
     parser.add_argument('--notice', type=int, help='提醒事件 4624/4625/4634')
+    parser.add_argument('--debug', action='store_true', help=r'记录本地日志，{}'.format(debug_filename))
     args = parser.parse_args()
 
     events = read_log()
 
+    if args.list:
+        df1 = pd.DataFrame(events)
+        fn = '{}.xlsx'.format(HOSTNAME)
+        df1.to_excel(fn, index=False)
+        print('输出到文件 {}'.format(fn))
+        return
+
+    lag = 20
+    events1 = []
+    logon_event = {}
+    for event in events:
+        if re.search('(UMFD|DWM)', event.get('TargetUserName', '')):
+            continue
+        if int(event.get('LogonType', -1)) in [4, 5]:
+            continue
+        if (datetime.datetime.now() - event['Time']).total_seconds() > lag:
+            continue
+        if event['EventID'] == 4624:
+            logon_event[event['TargetLogonId']] = event
+        events1.append(event)
+
     if args.notice == 4624:
-        for event in events:
+        for event in events1:
             if event['EventID'] != 4624:
                 continue
-            if re.search('(UMFD|DWM)', event.get('TargetUserName', ''), re.I):
-                return
-            if int(event['LogonType']) in [4, 5]:
-                return
             notice(event)
             break
     elif args.notice == 4625:
-        for event in events:
+        for event in events1:
             if event['EventID'] != 4625:
                 continue
             notice(event)
             break
     elif args.notice == 4634:
-        for event in events:
+        for event in events1:
             if event['EventID'] != 4634:
                 continue
-            if int(event['LogonType']) in [4, 5]:
+            TargetLogonId = event['TargetLogonId']
+            # 解锁会产生一条相同TIme和TargetLogonId的4624和4634事件，忽略
+            if TargetLogonId in logon_event and (event['Time'] - logon_event[TargetLogonId]['Time']) < 2:
                 return
             notice(event)
             break
-    elif args.list:
-        df1 = pd.DataFrame(events)
-        fn = '{}.xlsx'.format(socket.gethostname())
-        df1.to_excel(fn, index=False)
-        print('输出到文件 {}'.format(fn))
 
 
 if __name__ == '__main__':
